@@ -1,0 +1,9 @@
+[Unit]
+Description=root-protection thin pool health check
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/root-protection health
+# health returns 1 warn / 2 crit; don't mark service failed on warn
+SuccessExitStatus=0 1 2

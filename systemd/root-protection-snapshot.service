@@ -1,0 +1,12 @@
+[Unit]
+Description=root-protection daily system snapshot
+Documentation=file:///usr/share/doc/root-protection/INSTALL.md
+Requires=local-fs.target
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/root-protection snapshot-daily
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

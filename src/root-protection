@@ -1,0 +1,261 @@
+#!/usr/bin/python3
+import argparse
+import os
+import sys
+
+# allow running from source tree
+_SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _SRC not in sys.path and os.path.isdir(os.path.join(_SRC, "rpctl")):
+    sys.path.insert(0, _SRC)
+
+from rpctl import __version__
+from rpctl.boot import rollback_boot, rollback_merge, sync_all_boot_entries
+from rpctl.config import Config, DEFAULT_CONFIG_PATH
+from rpctl.health import check_health
+from rpctl.service import disable, enable, status_text
+from rpctl.snap import cleanup, create_snapshot, delete_snapshot, list_snapshots
+from rpctl.util import RpError, eprint, journal, require_root, run_out, wall
+
+
+def _cfg(args) -> Config:
+    path = getattr(args, "config", None) or DEFAULT_CONFIG_PATH
+    return Config.load(path)
+
+
+def cmd_status(args):
+    print(status_text(_cfg(args)))
+    return 0
+
+
+def cmd_doctor(args):
+    from rpctl.detect import detect_layout, doctor_text as _dt
+
+    layout = detect_layout()
+    print(_dt(layout))
+    return 0 if layout.ok else 1
+
+
+def cmd_version(args):
+    ver_file = "/usr/lib/root-protection/VERSION"
+    installed = None
+    if os.path.exists(ver_file):
+        installed = open(ver_file, encoding="utf-8").read().strip()
+    print(f"root-protection {__version__}")
+    if installed and installed != __version__:
+        print(f"installed stamp {installed} (re-run make install)")
+    print(f"module {os.path.abspath(sys.modules['rpctl'].__file__)}")
+    return 0
+
+
+def cmd_enable(args):
+    require_root()
+    print(f"root-protection {__version__}")
+    print(enable(_cfg(args)))
+    return 0
+
+
+def cmd_disable(args):
+    require_root()
+    print(disable(_cfg(args)))
+    return 0
+
+
+def cmd_create(args):
+    require_root()
+    cfg = _cfg(args)
+    if not cfg.enabled and not args.force:
+        raise RpError("disabled. pass --force or run enable")
+    cleanup_algo = args.cleanup or "number"
+    if args.timeline:
+        cleanup_algo = "timeline"
+    num = create_snapshot(
+        cfg,
+        description=args.description or "manual",
+        cleanup=cleanup_algo,
+        important=args.important,
+        sync_boot=not args.no_boot,
+    )
+    print(f"created snapshot #{num}")
+    return 0
+
+
+def cmd_list(args):
+    cfg = _cfg(args)
+    snaps = list_snapshots(cfg)
+    if not snaps:
+        print("no snapshots")
+        return 0
+    print(f"{'#':<6} {'type':<8} {'date':<20} {'cleanup':<10} description")
+    for s in snaps:
+        print(f"{s.number:<6} {s.type:<8} {s.date:<20} {s.cleanup:<10} {s.description}")
+        if args.verbose and s.lv:
+            print(f"       lv={s.lv}")
+    return 0
+
+
+def cmd_delete(args):
+    require_root()
+    cfg = _cfg(args)
+    delete_snapshot(cfg, int(args.id))
+    print(f"deleted snapshot #{args.id}")
+    return 0
+
+
+def cmd_rollback(args):
+    require_root()
+    cfg = _cfg(args)
+    number = int(args.id)
+    if args.merge:
+        print(rollback_merge(cfg, number))
+    else:
+        # default --boot behavior
+        print(rollback_boot(cfg, number))
+    return 0
+
+
+def cmd_sync_boot(args):
+    require_root()
+    cfg = _cfg(args)
+    n = sync_all_boot_entries(cfg)
+    script = "/usr/libexec/root-protection/fix-grub-layout"
+    if os.path.exists(script):
+        out = run_out(["bash", script, "all"], check=False)
+        if out:
+            print(out)
+    print(f"boot sync done ({n} new entries)")
+    return 0
+
+
+def cmd_fix_boot(args):
+    require_root()
+    script = "/usr/libexec/root-protection/fix-grub-layout"
+    if not os.path.exists(script):
+        raise RpError("missing fix-grub-layout, run make install")
+    out = run_out(["bash", script, "all"], check=True)
+    if out:
+        print(out)
+    print("done. reboot: top entry should be Oreon, snaps under 'root-protection snapshots'")
+    return 0
+
+
+def cmd_cleanup(args):
+    require_root()
+    cfg = _cfg(args)
+    cleanup(cfg)
+    print("cleanup done")
+    return 0
+
+
+def cmd_health(args):
+    cfg = _cfg(args)
+    h = check_health(
+        warn_data=cfg.get("health", "warn_data_percent", 70),
+        crit_data=cfg.get("health", "crit_data_percent", 85),
+        warn_meta=cfg.get("health", "warn_meta_percent", 70),
+        crit_meta=cfg.get("health", "crit_meta_percent", 85),
+    )
+    print(f"{h.level}: {h.message}")
+    if h.level == "warn":
+        journal(h.message, "warning")
+    if h.level == "crit":
+        journal(h.message, "err")
+        if cfg.get("health", "wall_on_crit", True):
+            wall(h.message)
+        return 2
+    if h.level == "warn":
+        return 1
+    return 0
+
+
+def cmd_snapshot_daily(args):
+    """Called by systemd timer."""
+    require_root()
+    cfg = _cfg(args)
+    if not cfg.enabled:
+        return 0
+    num = create_snapshot(
+        cfg,
+        description="daily timeline",
+        cleanup="timeline",
+        sync_boot=True,
+    )
+    print(f"daily snapshot #{num}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="root-protection",
+        description="ext4 LVM-thin system snapshots, GRUB rollback, soft root guards",
+    )
+    p.add_argument("--config", default=DEFAULT_CONFIG_PATH, help="config path")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("status", help="show status")
+    s.set_defaults(func=cmd_status)
+
+    s = sub.add_parser("version", help="show version / install path")
+    s.set_defaults(func=cmd_version)
+
+    s = sub.add_parser("doctor", help="check layout and deps")
+    s.set_defaults(func=cmd_doctor)
+
+    s = sub.add_parser("enable", help="configure and turn on")
+    s.set_defaults(func=cmd_enable)
+
+    s = sub.add_parser("disable", help="turn off timers")
+    s.set_defaults(func=cmd_disable)
+
+    s = sub.add_parser("create", help="create snapshot")
+    s.add_argument("-d", "--description", default="")
+    s.add_argument("--cleanup", default="number")
+    s.add_argument("--timeline", action="store_true")
+    s.add_argument("--important", action="store_true")
+    s.add_argument("--no-boot", action="store_true")
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(func=cmd_create)
+
+    s = sub.add_parser("list", help="list snapshots")
+    s.add_argument("-v", "--verbose", action="store_true")
+    s.set_defaults(func=cmd_list)
+
+    s = sub.add_parser("delete", help="delete snapshot")
+    s.add_argument("id")
+    s.set_defaults(func=cmd_delete)
+
+    s = sub.add_parser("rollback", help="boot into snap or schedule merge")
+    s.add_argument("id")
+    s.add_argument("--boot", action="store_true", default=True, help="ensure GRUB/boom entry (default)")
+    s.add_argument("--merge", action="store_true", help="schedule lvconvert --merge and reboot")
+    s.set_defaults(func=cmd_rollback)
+
+    s = sub.add_parser("sync-boot", help="rebuild boom entries from snapper")
+    s.set_defaults(func=cmd_sync_boot)
+
+    s = sub.add_parser("fix-boot", help="force GRUB default back to live OS (not snapshots)")
+    s.set_defaults(func=cmd_fix_boot)
+
+    s = sub.add_parser("cleanup", help="run snapper cleanup + boot sync")
+    s.set_defaults(func=cmd_cleanup)
+
+    s = sub.add_parser("health", help="check thin pool usage")
+    s.set_defaults(func=cmd_health)
+
+    s = sub.add_parser("snapshot-daily", help=argparse.SUPPRESS)
+    s.set_defaults(func=cmd_snapshot_daily)
+
+    return p
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return int(args.func(args) or 0)
+    except RpError as e:
+        eprint(f"root-protection: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

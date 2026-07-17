@@ -1,0 +1,89 @@
+#!/bin/bash
+set -u
+
+STATE_DIR=/run/root-protection
+PRE_FILE="$STATE_DIR/dnf-pre-number"
+CONF=/etc/root-protection/config.toml
+BIN=/usr/bin/root-protection
+GET=/usr/libexec/root-protection/rp-conf-get.awk
+
+log() { logger -t root-protection "$*" 2>/dev/null || true; }
+
+conf_get() {
+  local sec="$1" key="$2" def="${3:-}"
+  local v=""
+  if [[ -x "$GET" || -f "$GET" ]]; then
+    v=$(awk -f "$GET" "$sec" "$key" "$CONF" 2>/dev/null || true)
+  fi
+  if [[ -z "$v" ]]; then
+    echo "$def"
+  else
+    echo "$v"
+  fi
+}
+
+enabled() {
+  [[ -f "$CONF" ]] || return 1
+  [[ "$(conf_get general enabled false)" == "true" ]] || return 1
+  [[ "$(conf_get dnf pre_post_snapshots true)" == "true" ]] || return 1
+  return 0
+}
+
+refuse_if_crit() {
+  local rc=0
+  "$BIN" health >/dev/null 2>&1 || rc=$?
+  if [[ "$rc" -eq 2 && "$(conf_get health refuse_create_on_crit true)" == "true" ]]; then
+    log "skipping dnf snapshot, thin pool critical"
+    return 1
+  fi
+  return 0
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  pre)
+    enabled || exit 0
+    command -v snapper >/dev/null || exit 0
+    refuse_if_crit || exit 0
+    mkdir -p "$STATE_DIR"
+    cfg=$(conf_get general snapper_config root)
+    num=$(snapper -c "$cfg" create -t pre --cleanup number -d "dnf pre" -p 2>/dev/null) || {
+      log "dnf pre snapshot failed"
+      exit 0
+    }
+    echo "$num" >"$PRE_FILE"
+    if [[ "$(conf_get dnf sync_boot_after true)" == "true" ]]; then
+      "$BIN" sync-boot >/dev/null 2>&1 || true
+    fi
+    log "dnf pre snapshot #$num"
+    ;;
+  post)
+    enabled || exit 0
+    command -v snapper >/dev/null || exit 0
+    mkdir -p "$STATE_DIR"
+    cfg=$(conf_get general snapper_config root)
+    pre=""
+    [[ -f "$PRE_FILE" ]] && pre=$(cat "$PRE_FILE" 2>/dev/null || true)
+    if [[ -n "$pre" ]]; then
+      refuse_if_crit || { rm -f "$PRE_FILE"; exit 0; }
+      post=$(snapper -c "$cfg" create -t post --pre-number "$pre" --cleanup number -d "dnf post" -p 2>/dev/null) || {
+        log "dnf post snapshot failed"
+        rm -f "$PRE_FILE"
+        exit 0
+      }
+      rm -f "$PRE_FILE"
+      if [[ "$(conf_get dnf sync_boot_after true)" == "true" ]]; then
+        "$BIN" sync-boot >/dev/null 2>&1 || true
+      fi
+      log "dnf post snapshot #$post (pre #$pre)"
+    else
+      refuse_if_crit || exit 0
+      "$BIN" create -d "dnf post" --cleanup number --force >/dev/null 2>&1 || true
+    fi
+    ;;
+  *)
+    echo "usage: dnf-hook pre|post" >&2
+    exit 2
+    ;;
+esac
+exit 0

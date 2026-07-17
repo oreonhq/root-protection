@@ -1,0 +1,147 @@
+#!/bin/bash
+# Move root-protection boom BLS entries out of the top-level GRUB BLS list
+# into /boot/root-protection/bls and rebuild grub so snaps are a submenu.
+set -euo pipefail
+
+ENTRIES=/boot/loader/entries
+RP_BLS=/boot/root-protection/bls
+
+mkdir -p "$RP_BLS" /var/lib/root-protection
+
+is_rp_entry() {
+  local f="$1"
+  grep -qiE '^title[[:space:]]+root-protection|root-snapshot|rd\.lvm\.lv=.*-snapshot' "$f" 2>/dev/null
+}
+
+live_entry_path() {
+  local mid kver f
+  mid=$(tr -d '[:space:]' </etc/machine-id 2>/dev/null || true)
+  kver=$(uname -r)
+  if [[ -n "$mid" && -f "${ENTRIES}/${mid}-${kver}.conf" ]]; then
+    echo "${ENTRIES}/${mid}-${kver}.conf"
+    return 0
+  fi
+  for f in "$ENTRIES"/*.conf; do
+    [[ -e "$f" ]] || continue
+    is_rp_entry "$f" && continue
+    if grep -Fq "$kver" "$f" 2>/dev/null; then
+      echo "$f"
+      return 0
+    fi
+  done
+  for f in "$ENTRIES"/*.conf; do
+    [[ -e "$f" ]] || continue
+    is_rp_entry "$f" && continue
+    if grep -qiE '^title[[:space:]]+Oreon' "$f" 2>/dev/null; then
+      echo "$f"
+      return 0
+    fi
+  done
+  return 1
+}
+
+editenv_all() {
+  local args=("$@")
+  local grubenv
+  for grubenv in /boot/grub2/grubenv /boot/grub/grubenv; do
+    [[ -f "$grubenv" ]] || continue
+    grub2-editenv "$grubenv" "${args[@]}" 2>/dev/null || true
+  done
+  if [[ -d /boot/efi/EFI ]]; then
+    while IFS= read -r -d '' grubenv; do
+      grub2-editenv "$grubenv" "${args[@]}" 2>/dev/null || true
+    done < <(find /boot/efi/EFI -name grubenv -print0 2>/dev/null)
+  fi
+}
+
+relocate_rp_entries() {
+  local f base n=0
+  shopt -s nullglob
+  for f in "$ENTRIES"/*.conf; do
+    if is_rp_entry "$f" || grep -qi 'root-protection' "$f" 2>/dev/null || grep -q 'root-snapshot' "$f" 2>/dev/null; then
+      base=$(basename "$f")
+      mv -f "$f" "${RP_BLS}/${base}"
+      echo "relocated $base"
+      n=$((n + 1))
+    fi
+  done
+  echo "relocated $n snapshot BLS entries"
+}
+
+set_live_default() {
+  local live id
+  live=$(live_entry_path || true)
+  if [[ -z "${live:-}" ]]; then
+    echo "no live Oreon BLS entry found" >&2
+    ls -la "$ENTRIES" >&2 || true
+    return 1
+  fi
+  id=$(basename "$live" .conf)
+  echo "$id" >/var/lib/root-protection/grub-default
+
+  # stop "last booted snap becomes next default"
+  editenv_all set save_default=false
+  editenv_all unset next_entry
+  editenv_all unset prev_saved_entry
+  editenv_all set "saved_entry=${id}"
+
+  if command -v grubby >/dev/null; then
+    grubby --set-default="$live" 2>/dev/null || true
+  fi
+
+  if [[ -f /etc/default/grub ]]; then
+    if grep -q '^GRUB_DEFAULT=' /etc/default/grub; then
+      sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub
+    else
+      echo 'GRUB_DEFAULT=saved' >>/etc/default/grub
+    fi
+    if grep -q '^GRUB_SAVEDEFAULT=' /etc/default/grub; then
+      sed -i 's/^GRUB_SAVEDEFAULT=.*/GRUB_SAVEDEFAULT=false/' /etc/default/grub
+    else
+      echo 'GRUB_SAVEDEFAULT=false' >>/etc/default/grub
+    fi
+  fi
+
+  echo "default -> $id"
+  echo "save_default disabled so recovery boots do not steal default"
+}
+
+regen_grub() {
+  if [[ -x /etc/grub.d/42_root-protection ]]; then
+    chmod +x /etc/grub.d/42_root-protection
+  fi
+  if [[ -d /boot/grub2 ]] || [[ ! -e /boot/grub/grub.cfg ]]; then
+    mkdir -p /boot/grub2
+    grub2-mkconfig -o /boot/grub2/grub.cfg
+    return 0
+  fi
+  grub2-mkconfig -o /boot/grub/grub.cfg
+}
+
+verify() {
+  echo "--- /boot/loader/entries (should be Oreon only) ---"
+  ls -1 "$ENTRIES"/*.conf 2>/dev/null || true
+  echo "--- /boot/root-protection/bls (snaps) ---"
+  ls -1 "$RP_BLS"/*.conf 2>/dev/null || true
+  echo "--- grubenv ---"
+  grub2-editenv list 2>/dev/null || true
+}
+
+cmd="${1:-all}"
+case "$cmd" in
+  relocate) relocate_rp_entries ;;
+  default) set_live_default ;;
+  mkconfig) regen_grub ;;
+  verify) verify ;;
+  all)
+    relocate_rp_entries
+    set_live_default
+    regen_grub
+    verify
+    echo "grub layout fixed. reboot. top entry must be Oreon."
+    ;;
+  *)
+    echo "usage: fix-grub-layout relocate|default|mkconfig|verify|all" >&2
+    exit 2
+    ;;
+esac

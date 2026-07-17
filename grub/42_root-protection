@@ -1,0 +1,50 @@
+#!/bin/bash
+# grub.d snippet: nest root-protection snaps under a submenu (not top-level BLS peers)
+set -euo pipefail
+# grub-mkconfig runs this and captures stdout as grub.cfg fragments
+echo "### BEGIN /etc/grub.d/42_root-protection ###"
+
+RP_BLS=/boot/root-protection/bls
+if [[ ! -d "$RP_BLS" ]]; then
+  echo "### END /etc/grub.d/42_root-protection ###"
+  exit 0
+fi
+
+shopt -s nullglob
+confs=("$RP_BLS"/*.conf)
+if [[ ${#confs[@]} -eq 0 ]]; then
+  echo "### END /etc/grub.d/42_root-protection ###"
+  exit 0
+fi
+
+echo "submenu 'root-protection snapshots' {"
+
+for conf in "${confs[@]}"; do
+  title=""
+  linux_img=""
+  initrd_img=""
+  options=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # strip CR
+    line=${line%$'\r'}
+    case "$line" in
+      title\ *) title=${line#title } ;;
+      linux\ *) linux_img=${line#linux } ;;
+      initrd\ *) initrd_img=${line#initrd } ;;
+      options\ *) options=${line#options } ;;
+    esac
+  done <"$conf"
+  [[ -n "$title" && -n "$linux_img" ]] || continue
+  # escape for grub
+  title_esc=${title//\\/\\\\}
+  title_esc=${title_esc//\"/\\\"}
+  echo "  menuentry \"${title_esc}\" {"
+  echo "    linux ${linux_img} ${options}"
+  if [[ -n "$initrd_img" ]]; then
+    echo "    initrd ${initrd_img}"
+  fi
+  echo "  }"
+done
+
+echo "}"
+echo "### END /etc/grub.d/42_root-protection ###"

@@ -1,0 +1,26 @@
+#!/bin/bash
+# keep GRUB default on the live OS and demote leftover top-level snap entries
+set -euo pipefail
+
+LIBEXEC=/usr/libexec/root-protection
+# prefer comprehensive layout fix when available
+if [[ -x "$LIBEXEC/fix-grub-layout" ]]; then
+  exec "$LIBEXEC/fix-grub-layout" all
+fi
+
+STATE=/var/lib/root-protection/grub-default
+ENTRIES=/boot/loader/entries
+mkdir -p /var/lib/root-protection
+
+cmd="${1:-restore}"
+case "$cmd" in
+  save|restore|demote)
+    if [[ -x "$LIBEXEC/fix-grub-layout" ]]; then
+      "$LIBEXEC/fix-grub-layout" all
+    fi
+    ;;
+  *)
+    echo "usage: restore-grub-default save|restore|demote" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,41 @@
+# /etc/root-protection/config.toml
+
+[general]
+enabled = false
+snapper_config = "root"
+boot_sync = true
+boot_snapshot = false
+
+[retention]
+# snapper number cleanup
+number_limit = 10
+number_limit_important = 5
+# timeline keep counts
+timeline_limit_hourly = 0
+timeline_limit_daily = 7
+timeline_limit_weekly = 2
+timeline_limit_monthly = 1
+timeline_limit_yearly = 0
+empty_pre_post_cleanup = true
+
+[health]
+warn_data_percent = 70
+crit_data_percent = 85
+warn_meta_percent = 70
+crit_meta_percent = 85
+refuse_create_on_crit = true
+wall_on_crit = true
+
+[guard]
+enabled = true
+# interactive root shells only
+interactive_only = true
+# require typed CONFIRM before allowing the command
+require_confirm = true
+# bypass with FORCE=1 env
+allow_force_env = true
+log_path = "/var/log/root-protection/guard.log"
+
+[dnf]
+pre_post_snapshots = true
+sync_boot_after = true

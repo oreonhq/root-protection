@@ -1,0 +1,9 @@
+*.pyc
+__pycache__/
+*.pyo
+*.tar.gz
+*.rpm
+/build/
+/dest/
+*.egg-info/
+.venv/

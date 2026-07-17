@@ -1,0 +1,121 @@
+#!/bin/bash
+# create/find a boom OsProfile that works on Oreon (boom --from-host cannot)
+set -euo pipefail
+
+STATE=/var/lib/root-protection/boom-profile-id
+mkdir -p /var/lib/root-protection /boot/boom/profiles 2>/dev/null || true
+
+is_os_id() {
+  [[ "$1" =~ ^[0-9a-fA-F]{7,}$ ]]
+}
+
+have_profile() {
+  local id="$1"
+  is_os_id "$id" || return 1
+  boom profile show "$id" &>/dev/null && return 0
+  boom profile list 2>/dev/null | grep -Eoq "(^|[^0-9a-fA-F])${id}([^0-9a-fA-F]|$)"
+}
+
+extract_ids() {
+  grep -oE '[0-9a-fA-F]{16,}' | head -5
+}
+
+uname_pattern() {
+  local krel upat
+  krel=$(uname -r)
+  # Oreon kernels look like 7.0.12-200.or11.x86_64
+  upat=$(grep -oE 'or[0-9]+' <<<"$krel" || true)
+  [[ -n "$upat" ]] || upat=$(grep -oE 'el[0-9]+' <<<"$krel" || true)
+  [[ -n "$upat" ]] || upat=$(grep -oE 'fc[0-9]+' <<<"$krel" || true)
+  [[ -n "$upat" ]] || upat=oreon
+  echo "$upat"
+}
+
+profile_uname_ok() {
+  local id="$1" want got
+  want=$(uname_pattern)
+  got=$(boom profile show "$id" 2>/dev/null | grep -i 'UTS\|uname' | head -1 || true)
+  # if we cannot read it, accept the profile
+  [[ -z "$got" ]] && return 0
+  grep -Fq "$want" <<<"$got"
+}
+
+first_profile_id() {
+  local id=""
+
+  if [[ -d /boot/boom/profiles ]]; then
+    for f in /boot/boom/profiles/*.profile; do
+      [[ -e "$f" ]] || continue
+      id=$(basename "$f" .profile)
+      if is_os_id "$id"; then
+        echo "$id"
+        return 0
+      fi
+    done
+  fi
+
+  id=$(boom profile list 2>/dev/null | extract_ids | head -1 || true)
+  if is_os_id "${id:-}"; then
+    echo "$id"
+    return 0
+  fi
+  echo ""
+}
+
+create_profile() {
+  local NAME=Oreon ID=oreon VERSION=1 VERSION_ID=1 UPAT out rc id
+  if [[ -f /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    NAME=${NAME:-Oreon}
+    ID=${ID:-oreon}
+    VERSION=${VERSION:-${VERSION_ID:-1}}
+    VERSION_ID=${VERSION_ID:-1}
+  fi
+  UPAT=$(uname_pattern)
+
+  set +e
+  out=$(boom profile create \
+    --name "$NAME" \
+    --short-name "$ID" \
+    --os-version "$VERSION" \
+    --os-version-id "$VERSION_ID" \
+    --uname-pattern "$UPAT" \
+    --kernel-pattern '/vmlinuz-%{version}' \
+    --initramfs-pattern '/initramfs-%{version}.img' \
+    --lvm-opts 'rd.lvm.lv=%{lvm_root_lv}' \
+    --os-options 'root=%{root_device} ro %{root_opts} rhgb quiet' 2>&1)
+  rc=$?
+  set -e
+
+  id=$(extract_ids <<<"$out" | head -1 || true)
+  if ! is_os_id "${id:-}"; then
+    id=$(first_profile_id)
+  fi
+  if ! is_os_id "${id:-}"; then
+    echo "ensure-boom-profile create failed (rc=$rc)" >&2
+    echo "$out" >&2
+    boom profile list >&2 || true
+    ls -la /boot/boom/profiles >&2 || true
+    exit 1
+  fi
+  echo "$id"
+}
+
+if [[ -f "$STATE" ]]; then
+  id=$(tr -d '[:space:]' <"$STATE" || true)
+  if have_profile "$id"; then
+    echo "$id"
+    exit 0
+  fi
+  rm -f "$STATE"
+fi
+
+id=$(first_profile_id)
+if is_os_id "${id:-}"; then
+  echo "$id" | tee "$STATE"
+  exit 0
+fi
+
+id=$(create_profile)
+echo "$id" | tee "$STATE"

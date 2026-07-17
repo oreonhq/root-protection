@@ -1,0 +1,116 @@
+#!/bin/bash
+# boom create entry for a snapper LVM thin snapshot
+# usage: boom-create-entry <snap_number> <vg> <root_lv_name> <title>
+set -euo pipefail
+
+num=${1:?snap number}
+vg=${2:?vg}
+rootlv=${3:?root lv name}
+title=${4:?title}
+
+LIBEXEC=/usr/libexec/root-protection
+PROFILE=$("$LIBEXEC/ensure-boom-profile")
+KVER=$(uname -r)
+SNAP_LV="${vg}/${rootlv}-snapshot${num}"
+
+if [[ ! "$PROFILE" =~ ^[0-9a-fA-F]{7,}$ ]]; then
+  echo "boom-create-entry: bad profile id '$PROFILE'" >&2
+  exit 1
+fi
+
+if ! lvs "$SNAP_LV" &>/dev/null; then
+  echo "boom-create-entry: snapshot LV missing: $SNAP_LV" >&2
+  lvs -a "${vg}" >&2 || true
+  exit 1
+fi
+
+# thin snaps often have activation-skip set; -K ignores that
+lvchange -ay -K "$SNAP_LV" &>/dev/null \
+  || lvchange -ay --ignoreactivationskip "$SNAP_LV" &>/dev/null \
+  || lvchange -ay "$SNAP_LV" &>/dev/null \
+  || true
+
+# give udev a moment for /dev/$vg/$lv nodes
+udevadm settle 2>/dev/null || true
+sleep 0.2
+
+VMLINUZ="/boot/vmlinuz-${KVER}"
+INITRD="/boot/initramfs-${KVER}.img"
+if [[ ! -f "$VMLINUZ" ]]; then
+  echo "boom-create-entry: missing $VMLINUZ" >&2
+  ls -la /boot/vmlinuz* >&2 || true
+  exit 1
+fi
+if [[ ! -f "$INITRD" ]]; then
+  if [[ -f "/boot/initrd-${KVER}.img" ]]; then
+    INITRD="/boot/initrd-${KVER}.img"
+  else
+    echo "boom-create-entry: missing initramfs for $KVER" >&2
+    ls -la /boot/init*${KVER}* >&2 || true
+    exit 1
+  fi
+fi
+
+while read -r bid; do
+  [[ -n "$bid" ]] || continue
+  [[ "$bid" =~ ^[0-9a-fA-F]{7,}$ ]] || continue
+  boom delete "$bid" &>/dev/null || true
+done < <(boom list 2>/dev/null | awk -v t="$title" 'index($0,t){print $1}')
+
+# mapper path always exists when active; /dev/vg/lv may not
+DEV_MAPPER="/dev/mapper/${vg}-$(echo "$rootlv-snapshot${num}" | sed 's/-/--/g')"
+DEV_VG="/dev/${vg}/${rootlv}-snapshot${num}"
+
+run_boom() {
+  local extra=()
+  # $1 = backup|nobackup  $2 = nodev|dev
+  if [[ "${1:-}" == "backup" ]]; then
+    extra+=(--backup)
+  fi
+  if [[ "${2:-}" == "nodev" ]]; then
+    extra+=(--no-dev)
+  fi
+  boom create \
+    "${extra[@]}" \
+    --profile "$PROFILE" \
+    --version "$KVER" \
+    --title "$title" \
+    --root-lv "$SNAP_LV" 2>&1
+}
+
+try_modes() {
+  local out rc
+  for bak in backup nobackup; do
+    for dev in dev nodev; do
+      set +e
+      out=$(run_boom "$bak" "$dev")
+      rc=$?
+      set -e
+      if [[ "$rc" -eq 0 ]]; then
+        echo "$out"
+        return 0
+      fi
+      echo "--- boom $bak $dev (rc=$rc) ---" >&2
+      echo "$out" >&2
+    done
+  done
+  return 1
+}
+
+if try_modes; then
+  if [[ -x "$LIBEXEC/fix-grub-layout" ]]; then
+    "$LIBEXEC/fix-grub-layout" all >/dev/null || true
+  elif [[ -x "$LIBEXEC/restore-grub-default" ]]; then
+    "$LIBEXEC/restore-grub-default" restore >/dev/null || true
+  fi
+  exit 0
+fi
+
+echo "boom-create-entry failed" >&2
+echo "profile=$PROFILE version=$KVER lv=$SNAP_LV title=$title" >&2
+echo "kernel=$VMLINUZ initrd=$INITRD" >&2
+echo "dev_vg=$DEV_VG exists=$([[ -e $DEV_VG ]] && echo yes || echo no)" >&2
+echo "dev_mapper=$DEV_MAPPER exists=$([[ -e $DEV_MAPPER ]] && echo yes || echo no)" >&2
+lvs -a -o name,attr,role,active "${vg}" >&2 || true
+boom profile show "$PROFILE" >&2 || true
+exit 1

@@ -1,0 +1,52 @@
+# catastrophic interactive root command patterns for root-protection guard
+# strings are matched as substrings against the expanded command line (lowercased)
+
+[allowlist]
+# never intercept these binaries (matched as command words)
+commands = [
+  "dnf",
+  "dnf5",
+  "yum",
+  "rpm",
+  "packagekitd",
+  "pkcon",
+  "snapper",
+  "boom",
+  "root-protection",
+  "lvcreate",
+  "lvremove",
+  "lvconvert",
+  "lvchange",
+  "vgchange",
+]
+
+[patterns]
+# if a command matches any of these and is not allowlisted, require confirm
+dangerous = [
+  "rm -rf /",
+  "rm -rf /*",
+  "rm -fr /",
+  "rm --no-preserve-root",
+  "rm -rf /usr",
+  "rm -rf /usr/",
+  "rm -rf /etc",
+  "rm -rf /boot",
+  "rm -rf /var",
+  "rm -rf /lib",
+  "rm -rf /lib64",
+  "rm -rf /bin",
+  "rm -rf /sbin",
+  "rm -rf /opt",
+  "mkfs /",
+  "mkfs.ext4 /dev/",
+  "mkfs.xfs /dev/",
+  "mkfs.btrfs /dev/",
+  "dd if=",
+  "wipefs",
+  "sgdisk --zap",
+  "sfdisk",
+  "shred /dev/",
+  "mv /usr ",
+  "chmod -R 000 /",
+  "chown -R ",
+]

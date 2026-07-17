@@ -1,0 +1,5 @@
+# dnf5 libdnf5-plugin-actions hooks for root-protection
+# installed to /etc/dnf/libdnf5-plugins/actions.d/root-protection.actions
+
+pre_transaction::::/usr/libexec/root-protection/dnf-hook pre
+post_transaction::::/usr/libexec/root-protection/dnf-hook post
